@@ -1,0 +1,349 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Invisible Lines — Optimized Intersection Visualizer</title>
+  <style>
+    :root {
+      --bg: #202138;
+      --panel: #2a2c48;
+      --text: #cfd6ff;
+      --accent: #9bdcff;
+    }
+    html, body {
+      margin: 0; height: 100%; background: var(--bg); color: var(--text);
+      font-family: sans-serif;
+    }
+    .wrap { display:flex; align-items:center; justify-content:center; height:100%; }
+    .stage { width: 80vw; height: 80vh; position: relative; }
+    canvas { width: 100%; height: 100%; display:block; border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,0.35) inset; }
+    .hud {
+      position: absolute; right: 12px; bottom: 12px; background: rgba(42,44,72,0.8);
+      backdrop-filter: blur(6px); border-radius: 12px; padding: 10px 12px; display:none; gap:10px; align-items:center;
+      transition: opacity 0.3s ease; flex-wrap: wrap; max-width: 300px;
+    }
+    .hud.visible { display:flex; }
+    .hud label { font-size: 13px; display:flex; gap:8px; align-items:center; cursor: pointer; }
+    .hud input[type="checkbox"] { transform: scale(1.15); accent-color: var(--accent); }
+    .hud input[type="range"] { width: 80px; }
+    .hud button {
+      background: transparent; border: 1px solid rgba(255,255,255,0.12); color: var(--text); border-radius: 10px;
+      padding: 6px 10px; font-size: 12px; cursor: pointer;
+    }
+    .fps {
+      font-size: 11px; opacity: 0.7; min-width: 60px;
+    }
+    .toggle-controls {
+      position: absolute; right: 12px; bottom: 12px; background: rgba(42,44,72,0.8);
+      padding: 6px 10px; border-radius: 12px; cursor: pointer; font-size: 12px;
+    }
+    .control-group {
+      display: flex; flex-direction: column; gap: 4px; font-size: 11px;
+    }
+    .control-row {
+      display: flex; gap: 6px; align-items: center;
+    }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="stage" id="stage">
+      <canvas id="cnv"></canvas>
+      <div class="hud" id="hud">
+        <label><input type="checkbox" id="toggleShow" checked /> Intersections</label>
+        <label><input type="checkbox" id="toggleLines" /> Lines</label>
+        
+        <div class="control-group">
+          <div class="control-row">
+            <span>Count:</span>
+            <input type="range" id="lineCount" min="3" max="25" value="10" />
+            <span id="lineCountVal">10</span>
+          </div>
+        </div>
+        
+        <button id="btnPause">Pause</button>
+        <button id="btnReset">Reset</button>
+        <div class="fps" id="fps">FPS: --</div>
+      </div>
+      <div class="toggle-controls" id="toggleBtn">⚙️ Controls</div>
+    </div>
+  </div>
+<script>
+(() => {
+  const cfg = {
+    lengthMin: 80,
+    lengthMax: 240,
+    speedMin: 40,
+    speedMax: 120,
+    rotMin: -0.6,
+    rotMax: 0.6,
+    pingRadius: 3.5,
+    pingLife: 0.85,
+    bg: getComputedStyle(document.documentElement).getPropertyValue('--bg').trim(),
+    tint: getComputedStyle(document.documentElement).getPropertyValue('--accent').trim(),
+  };
+  
+  const stage = document.getElementById('stage');
+  const canvas = document.getElementById('cnv');
+  const ctx = canvas.getContext('2d');
+  const toggleShow = document.getElementById('toggleShow');
+  const toggleLines = document.getElementById('toggleLines');
+  const btnPause = document.getElementById('btnPause');
+  const btnReset = document.getElementById('btnReset');
+  const hud = document.getElementById('hud');
+  const toggleBtn = document.getElementById('toggleBtn');
+  const fpsDisplay = document.getElementById('fps');
+  const lineCountSlider = document.getElementById('lineCount');
+  const lineCountVal = document.getElementById('lineCountVal');
+  const speedMultSlider = document.getElementById('speedMult');
+    const speedMultVal = document.getElementById('speedMultVal');
+    const toggleGradient = document.getElementById('toggleGradient');
+  
+  let W = 0, H = 0, running = true;
+  let lineCount = 10, speedMultiplier = 1;
+
+  // Performance tracking
+  let frameCount = 0, fpsTimer = 0, lastFPS = 0;
+
+  toggleBtn.addEventListener('click', () => {
+    hud.classList.toggle('visible');
+  });
+
+  // Control handlers
+  lineCountSlider.addEventListener('input', (e) => {
+    lineCount = parseInt(e.target.value);
+    lineCountVal.textContent = lineCount;
+    resetWorld();
+  });
+
+  function resize(){
+    const rect = stage.getBoundingClientRect();
+    W = rect.width; H = rect.height;
+    const DPR = window.devicePixelRatio || 1;
+    canvas.width = W * DPR; canvas.height = H * DPR;
+    ctx.setTransform(DPR,0,0,DPR,0,0);
+  }
+  new ResizeObserver(resize).observe(stage);
+  resize();
+
+  const rand = (a,b) => a + Math.random()*(b-a);
+  const clamp = (x,a,b) => Math.min(b, Math.max(a, x));
+  
+  // Optimized segment with cached trig values
+  function segmentEndpoints(seg){
+    const dx = seg.cosAngle * seg.halfLen;
+    const dy = seg.sinAngle * seg.halfLen;
+    return { 
+      ax: seg.cx - dx, ay: seg.cy - dy, 
+      bx: seg.cx + dx, by: seg.cy + dy 
+    };
+  }
+  
+  function updateSegmentTrig(seg) {
+    seg.cosAngle = Math.cos(seg.angle);
+    seg.sinAngle = Math.sin(seg.angle);
+  }
+  
+  function reflectIfOut(seg){
+    const {ax,ay,bx,by} = segmentEndpoints(seg);
+    let hitX = false, hitY = false;
+    if (ax < 0 || bx < 0 || ax > W || bx > W) hitX = true;
+    if (ay < 0 || by < 0 || ay > H || by > H) hitY = true;
+    if (hitX) seg.vx *= -1;
+    if (hitY) seg.vy *= -1;
+    seg.cx = clamp(seg.cx, seg.halfLen, W - seg.halfLen);
+    seg.cy = clamp(seg.cy, seg.halfLen, H - seg.halfLen);
+  }
+  
+  // Optimized intersection with bounding box early exit
+  function segIntersect(s1, s2){
+    const e1 = segmentEndpoints(s1), e2 = segmentEndpoints(s2);
+    
+    // Quick bounding box check
+    const bb1MinX = Math.min(e1.ax, e1.bx), bb1MaxX = Math.max(e1.ax, e1.bx);
+    const bb1MinY = Math.min(e1.ay, e1.by), bb1MaxY = Math.max(e1.ay, e1.by);
+    const bb2MinX = Math.min(e2.ax, e2.bx), bb2MaxX = Math.max(e2.ax, e2.bx);
+    const bb2MinY = Math.min(e2.ay, e2.by), bb2MaxY = Math.max(e2.ay, e2.by);
+    
+    if (bb1MaxX < bb2MinX || bb2MaxX < bb1MinX || 
+        bb1MaxY < bb2MinY || bb2MaxY < bb1MinY) return null;
+    
+    const x1=e1.ax, y1=e1.ay, x2=e1.bx, y2=e1.by;
+    const x3=e2.ax, y3=e2.ay, x4=e2.bx, y4=e2.by;
+    const den = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4);
+    if (den === 0) return null;
+    const t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / den;
+    const u = ((x1-x3)*(y1-y2) - (y1-y3)*(x1-x2)) / den;
+    if (t <= 0 || t >= 1 || u <= 0 || u >= 1) return null;
+    return {x: x1 + t * (x2 - x1), y: y1 + t * (y2 - y1)};
+  }
+
+  function makeSegment(){
+    const halfLen = rand(cfg.lengthMin, cfg.lengthMax) / 2;
+    const cx = rand(halfLen, W-halfLen);
+    const cy = rand(halfLen, H-halfLen);
+    const sp = rand(cfg.speedMin, cfg.speedMax);
+    const dir = rand(0, Math.PI*2);
+    const angle = rand(0, Math.PI*2);
+    
+    return { 
+      cx, cy, 
+      vx: Math.cos(dir) * sp, 
+      vy: Math.sin(dir) * sp, 
+      angle, 
+      angVel: rand(cfg.rotMin, cfg.rotMax), 
+      halfLen,
+      cosAngle: Math.cos(angle),
+      sinAngle: Math.sin(angle)
+    };
+  }
+
+  let segments = [];
+  
+  // Optimized ping management with circular buffer
+  const MAX_PINGS = 2000;
+  let pings = new Array(MAX_PINGS);
+  let pingHead = 0, pingCount = 0;
+  
+  function addPing(x, y) {
+    pings[pingHead] = { x, y, t: 0 };
+    pingHead = (pingHead + 1) % MAX_PINGS;
+    if (pingCount < MAX_PINGS) pingCount++;
+  }
+  
+  function updatePings(dt) {
+    let activeCount = 0;
+    const startIndex = pingCount === MAX_PINGS ? pingHead : 0;
+    
+    for (let i = 0; i < pingCount; i++) {
+      const index = (startIndex + i) % MAX_PINGS;
+      const ping = pings[index];
+      if (!ping) continue;
+      
+      ping.t += dt;
+      if (ping.t <= cfg.pingLife) {
+        if (activeCount !== i) {
+          const activeIndex = (startIndex + activeCount) % MAX_PINGS;
+          pings[activeIndex] = ping;
+        }
+        activeCount++;
+      }
+    }
+    
+    // Clear unused slots
+    for (let i = activeCount; i < pingCount; i++) {
+      const index = (startIndex + i) % MAX_PINGS;
+      pings[index] = null;
+    }
+    
+    pingCount = activeCount;
+    if (pingCount < MAX_PINGS) {
+      pingHead = (startIndex + pingCount) % MAX_PINGS;
+    }
+  }
+  
+  function renderPings() {
+    if (!toggleShow.checked || pingCount === 0) return;
+    
+    const startIndex = pingCount === MAX_PINGS ? pingHead : 0;
+    
+    for (let i = 0; i < pingCount; i++) {
+      const index = (startIndex + i) % MAX_PINGS;
+      const p = pings[index];
+      if (!p) continue;
+      
+      const alpha = 1 - p.t/cfg.pingLife;
+      ctx.fillStyle = `rgba(155,220,255,${alpha})`;
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, cfg.pingRadius, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function resetWorld(){ 
+    segments = Array.from({length: lineCount}, makeSegment); 
+    pingHead = 0;
+    pingCount = 0;
+    pings.fill(null);
+  }
+
+  let last = performance.now();
+  
+  function step(now){
+    if (!running) { 
+      requestAnimationFrame(step); 
+      return; 
+    }
+    
+    const dt = Math.min(0.05, (now-last)/1000); 
+    last = now;
+    
+    // Update FPS
+    frameCount++;
+    fpsTimer += dt;
+    if (fpsTimer >= 0.5) {
+      lastFPS = Math.round(frameCount / fpsTimer);
+      fpsDisplay.textContent = `FPS: ${lastFPS}`;
+      frameCount = 0;
+      fpsTimer = 0;
+    }
+    
+    // Update segments
+    for (const s of segments){
+      s.cx += s.vx * dt; 
+      s.cy += s.vy * dt; 
+      s.angle += s.angVel * dt;
+      updateSegmentTrig(s);
+      reflectIfOut(s);
+    }
+    
+    // Find intersections
+    for (let i = 0; i < segments.length; i++){
+      for (let j = i + 1; j < segments.length; j++){
+        const hit = segIntersect(segments[i], segments[j]);
+        if (hit) addPing(hit.x, hit.y);
+      }
+    }
+    
+    // Update pings
+    updatePings(dt);
+    
+    // Render
+    ctx.save();
+    ctx.fillStyle = cfg.bg; 
+    ctx.fillRect(0, 0, W, H);
+    
+    if (toggleLines.checked){
+      ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      for (const s of segments){
+        const {ax,ay,bx,by} = segmentEndpoints(s);
+        ctx.moveTo(ax, ay); 
+        ctx.lineTo(bx, by);
+      }
+      ctx.stroke();
+    }
+    
+    renderPings();
+    ctx.restore();
+    
+    requestAnimationFrame(step);
+  }
+  
+  requestAnimationFrame(step);
+
+  btnPause.addEventListener('click', () => { 
+    running = !running; 
+    btnPause.textContent = running ? 'Pause' : 'Resume'; 
+  });
+  
+  btnReset.addEventListener('click', resetWorld);
+  
+  // Initialize
+  resetWorld();
+})();
+</script>
+</body>
+</html>
