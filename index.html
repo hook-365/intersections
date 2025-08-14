@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Invisible Lines — Optimized Intersection Visualizer</title>
+  <title>the space between</title>
   <style>
     :root {
       --bg: #202138;
@@ -57,8 +57,8 @@
         <div class="control-group">
           <div class="control-row">
             <span>Count:</span>
-            <input type="range" id="lineCount" min="3" max="25" value="10" />
-            <span id="lineCountVal">10</span>
+            <input type="range" id="lineCount" min="3" max="25" value="15" />
+            <span id="lineCountVal">15</span>
           </div>
         </div>
         
@@ -101,7 +101,7 @@
     const toggleGradient = document.getElementById('toggleGradient');
   
   let W = 0, H = 0, running = true;
-  let lineCount = 10, speedMultiplier = 1;
+  let lineCount = 15, speedMultiplier = 1;
 
   // Performance tracking
   let frameCount = 0, fpsTimer = 0, lastFPS = 0;
